@@ -30,7 +30,7 @@ export default function LandingPage({ onEnter }: { onEnter: () => void }) {
                     className="mb-12 mt-4"
                 >
                     <h1 className="text-7xl md:text-9xl font-bold text-white drop-shadow-[0_4px_0_#00cc66] stroke-black" style={{ WebkitTextStroke: '2px rgba(0,0,0,0.2)' }}>
-                        Santa's <br />
+                        Santa&apos;s <br />
                         <span className="text-yellow-pop drop-shadow-[0_4px_0_#ff3366]">Helper</span>
                     </h1>
                     <p className="mt-6 text-2xl text-ice-blue font-bold tracking-wider animate-pulse">
