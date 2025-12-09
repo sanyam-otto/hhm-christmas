@@ -6,11 +6,52 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useConversation } from '@elevenlabs/react';
 import Scene3D from './Scene3D';
 
+// Web Speech API type definitions
+interface SpeechRecognitionAlternative {
+    transcript: string;
+    confidence: number;
+}
+
+interface SpeechRecognitionResult {
+    isFinal: boolean;
+    [index: number]: SpeechRecognitionAlternative;
+    length: number;
+}
+
+interface SpeechRecognitionResultList {
+    [index: number]: SpeechRecognitionResult;
+    length: number;
+}
+
+interface SpeechRecognitionEvent extends Event {
+    resultIndex: number;
+    results: SpeechRecognitionResultList;
+}
+
+interface SpeechRecognitionErrorEvent extends Event {
+    error: string;
+    message: string;
+}
+
+interface SpeechRecognition extends EventTarget {
+    continuous: boolean;
+    interimResults: boolean;
+    lang: string;
+    onresult: ((event: SpeechRecognitionEvent) => void) | null;
+    onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
+    onend: (() => void) | null;
+    start(): void;
+    stop(): void;
+}
+
 type SpeechRecognitionConstructor = new () => SpeechRecognition;
 
 const getSpeechRecognitionConstructor = (): SpeechRecognitionConstructor | null => {
     if (typeof window === 'undefined') return null;
-    const withPref = window as typeof window & { webkitSpeechRecognition?: SpeechRecognitionConstructor };
+    const withPref = window as typeof window & { 
+        SpeechRecognition?: SpeechRecognitionConstructor;
+        webkitSpeechRecognition?: SpeechRecognitionConstructor;
+    };
     return withPref.SpeechRecognition || withPref.webkitSpeechRecognition || null;
 };
 
