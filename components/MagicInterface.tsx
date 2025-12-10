@@ -74,6 +74,8 @@ export default function MagicInterface() {
     const [isListeningForWakeWord, setIsListeningForWakeWord] = useState(false);
     const [isDisconnecting, setIsDisconnecting] = useState(false);
     const [isMobile, setIsMobile] = useState(false);
+    const [permissionState, setPermissionState] = useState<'granted' | 'prompt' | 'denied' | 'unknown'>('unknown');
+    const [browserType, setBrowserType] = useState<'chrome' | 'safari' | 'firefox' | 'edge' | 'other'>('other');
 
     const conversation = useConversation({
         apiKey: process.env.NEXT_PUBLIC_ELEVENLABS_API_KEY,
@@ -122,19 +124,89 @@ export default function MagicInterface() {
 
     const [errorMsg, setErrorMsg] = useState('');
 
+    // Detect browser type for specific instructions
+    const detectBrowser = useCallback(() => {
+        const ua = navigator.userAgent;
+        if (ua.includes('Edg/')) return 'edge';
+        if (ua.includes('Chrome') && !ua.includes('Edg/')) return 'chrome';
+        if (ua.includes('Safari') && !ua.includes('Chrome')) return 'safari';
+        if (ua.includes('Firefox')) return 'firefox';
+        return 'other';
+    }, []);
+
+    // Check permission state without prompting
+    const checkMicPermissionState = useCallback(async () => {
+        try {
+            // @ts-ignore - permissions API might not be fully typed
+            const result = await navigator.permissions.query({ name: 'microphone' });
+            setPermissionState(result.state);
+            
+            // Listen for permission changes
+            result.addEventListener('change', () => {
+                setPermissionState(result.state);
+                if (result.state === 'granted') {
+                    setMicPermissionGranted(true);
+                    setErrorMsg('');
+                    console.log('Permission granted via browser settings!');
+                }
+            });
+            
+            return result.state;
+        } catch (error) {
+            console.log('Permission API not supported, falling back to prompt');
+            return 'prompt';
+        }
+    }, []);
+
     const requestMicPermission = useCallback(async () => {
         try {
+            // First check current permission state
+            const state = await checkMicPermissionState();
+            
+            if (state === 'denied') {
+                // Permission is permanently denied, show instructions
+                const browser = detectBrowser();
+                const instructions: Record<typeof browser, string> = {
+                    chrome: '🔒 Click the lock icon in the address bar → Site settings → Allow Microphone',
+                    edge: '🔒 Click the lock icon in the address bar → Site settings → Allow Microphone',
+                    safari: '🔒 Safari menu → Settings for this website → Allow Microphone',
+                    firefox: '🔒 Click the lock icon → Clear permissions and reload the page',
+                    other: '🔒 Please enable microphone access in your browser settings'
+                };
+                setErrorMsg(instructions[browser]);
+                setMicPermissionGranted(false);
+                return false;
+            }
+            
+            // Try to request permission
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             stream.getTracks().forEach(track => track.stop());
             setMicPermissionGranted(true);
+            setPermissionState('granted');
+            setErrorMsg('');
             return true;
         } catch (micError) {
             console.error('Microphone permission denied:', micError);
-            setErrorMsg('Please allow microphone access to talk to Santa!');
+            
+            // Check state again to determine if it's permanently denied
+            const state = await checkMicPermissionState();
+            if (state === 'denied') {
+                const browser = detectBrowser();
+                const instructions: Record<typeof browser, string> = {
+                    chrome: '🔒 Click the lock icon in the address bar → Site settings → Allow Microphone',
+                    edge: '🔒 Click the lock icon in the address bar → Site settings → Allow Microphone',
+                    safari: '🔒 Safari menu → Settings for this website → Allow Microphone',
+                    firefox: '🔒 Click the lock icon → Clear permissions and reload the page',
+                    other: '🔒 Please enable microphone access in your browser settings'
+                };
+                setErrorMsg(instructions[browser]);
+            } else {
+                setErrorMsg('Please allow microphone access to talk to Santa!');
+            }
             setMicPermissionGranted(false);
             return false;
         }
-    }, []);
+    }, [checkMicPermissionState, detectBrowser]);
 
     const toggleConnection = useCallback(async () => {
         try {
@@ -323,6 +395,10 @@ export default function MagicInterface() {
         const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
         setIsMobile(isMobileDevice);
         
+        // Detect browser type
+        const browser = detectBrowser();
+        setBrowserType(browser);
+        
         // Check for browser compatibility (just log, don't show error on mobile)
         const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
         const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
@@ -338,18 +414,29 @@ export default function MagicInterface() {
             // Don't show error banner on mobile - we already have mobile-friendly UI
         }
 
-        requestMicPermission().then((granted) => {
-            if (granted && !isMobileDevice) {
-                // Only start wake word listener on desktop
-                startWakeWordListener();
+        // Check permission state first
+        checkMicPermissionState().then((state) => {
+            if (state === 'granted') {
+                setMicPermissionGranted(true);
+                if (!isMobileDevice) {
+                    startWakeWordListener();
+                }
+            } else if (state === 'prompt') {
+                // Will prompt when needed
+                requestMicPermission().then((granted) => {
+                    if (granted && !isMobileDevice) {
+                        startWakeWordListener();
+                    }
+                });
             }
+            // If denied, don't request (will show instructions in error banner)
         });
 
         return () => {
             if (recognitionRef.current) recognitionRef.current.stop();
             if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
         };
-    }, [requestMicPermission, startWakeWordListener]);
+    }, [requestMicPermission, startWakeWordListener, checkMicPermissionState, detectBrowser]);
 
     return (
         <div className="relative mx-auto flex min-h-screen w-full max-w-4xl flex-col items-center gap-6 px-4 py-8 sm:px-8 font-sans text-center">
@@ -359,13 +446,54 @@ export default function MagicInterface() {
                 {/* Clean header */}
             </header>
 
-            {/* Error Banner - Click to dismiss/retry */}
+            {/* Error Banner - Different behavior based on permission state */}
             {errorMsg && (
-                <div
-                    onClick={() => { setErrorMsg(''); toggleConnection(); }}
-                    className="cursor-pointer w-full max-w-md rounded-xl bg-red-500/90 p-4 text-center font-bold text-white shadow-lg animate-bounce hover:bg-red-400 transition-colors mx-auto"
-                >
-                    {errorMsg} <br /> <span className="text-sm font-normal underline">Tap to Retry</span>
+                <div className="relative w-full max-w-md rounded-xl bg-red-500/90 p-4 text-white shadow-lg mx-auto">
+                    {/* Dismiss button */}
+                    <button
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            setErrorMsg('');
+                        }}
+                        className="absolute top-2 right-2 text-white hover:text-gray-200 transition-colors"
+                        aria-label="Dismiss"
+                    >
+                        <svg className="w-5 h-5" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24" stroke="currentColor">
+                            <path d="M6 18L18 6M6 6l12 12"></path>
+                        </svg>
+                    </button>
+                    
+                    <div className="pr-8">
+                        <div className="font-bold text-center mb-2">
+                            {permissionState === 'denied' ? 'Microphone Access Blocked' : 'Microphone Permission Needed'}
+                        </div>
+                        <div className="text-sm text-center">
+                            {errorMsg}
+                        </div>
+                        
+                        {/* Show retry button only if not permanently denied */}
+                        {permissionState !== 'denied' && (
+                            <button
+                                onClick={async () => { 
+                                    setErrorMsg(''); 
+                                    const granted = await requestMicPermission();
+                                    if (granted && !isMobile) {
+                                        startWakeWordListener();
+                                    }
+                                }}
+                                className="mt-3 w-full bg-white text-red-500 font-semibold py-2 px-4 rounded-lg hover:bg-gray-100 transition-colors"
+                            >
+                                Allow Microphone Access
+                            </button>
+                        )}
+                        
+                        {/* Show help text for permanently denied */}
+                        {permissionState === 'denied' && (
+                            <div className="mt-3 text-xs text-center bg-white/10 p-2 rounded">
+                                After enabling, refresh this page
+                            </div>
+                        )}
+                    </div>
                 </div>
             )}
 
