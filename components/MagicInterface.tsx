@@ -73,6 +73,7 @@ export default function MagicInterface() {
     const [micPermissionGranted, setMicPermissionGranted] = useState(false);
     const [isListeningForWakeWord, setIsListeningForWakeWord] = useState(false);
     const [isDisconnecting, setIsDisconnecting] = useState(false);
+    const [isMobile, setIsMobile] = useState(false);
 
     const conversation = useConversation({
         apiKey: process.env.NEXT_PUBLIC_ELEVENLABS_API_KEY,
@@ -212,8 +213,18 @@ export default function MagicInterface() {
     }, [agentId, conversation, isConnected, micPermissionGranted, requestMicPermission]);
 
     const startWakeWordListener = useCallback(() => {
+        // Don't start wake word listener on mobile devices
+        const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        if (isMobileDevice) {
+            console.log('Wake word listener disabled on mobile - use button instead');
+            return;
+        }
+        
         const SpeechRecognitionCtor = getSpeechRecognitionConstructor();
-        if (!SpeechRecognitionCtor) return;
+        if (!SpeechRecognitionCtor) {
+            console.error('Speech Recognition not available.');
+            return;
+        }
         if (sessionStartInFlightRef.current) return;
         if (recognitionRef.current) return;
         
@@ -308,8 +319,30 @@ export default function MagicInterface() {
 
     // Auto-request Mic on Mount
     useEffect(() => {
+        // Check for mobile device
+        const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        setIsMobile(isMobileDevice);
+        
+        // Check for browser compatibility (just log, don't show error on mobile)
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+        const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+        
+        if (isIOS && isSafari) {
+            console.warn('iOS Safari detected - Web Speech API not supported');
+            // Don't show error banner on mobile - we already have mobile-friendly UI
+        }
+        
+        // Check if using HTTP on non-localhost (just log, don't show error on mobile)
+        if (typeof window !== 'undefined' && window.location.protocol === 'http:' && window.location.hostname !== 'localhost') {
+            console.warn('HTTP detected on non-localhost - microphone access may be blocked');
+            // Don't show error banner on mobile - we already have mobile-friendly UI
+        }
+
         requestMicPermission().then((granted) => {
-            if (granted) startWakeWordListener();
+            if (granted && !isMobileDevice) {
+                // Only start wake word listener on desktop
+                startWakeWordListener();
+            }
         });
 
         return () => {
@@ -355,12 +388,25 @@ export default function MagicInterface() {
                 {/* Wake Word Prompt */}
                 {!isConnected && !isConnecting && !isDisconnecting && (
                     <div className="w-full text-center animate-bounce-slow">
-                        <h2 className="mb-2 text-2xl font-black tracking-wide text-[#0f172a] drop-shadow-sm sm:text-4xl">
-                            Say &quot;Hey Santa&quot;
-                        </h2>
-                        <p className="text-lg font-medium text-[#475569]">
-                            or tap the button below
-                        </p>
+                        {isMobile ? (
+                            <>
+                                <h2 className="mb-2 text-2xl font-black tracking-wide text-[#0f172a] drop-shadow-sm sm:text-4xl">
+                                    Ready to Chat?
+                                </h2>
+                                <p className="text-lg font-medium text-[#475569]">
+                                    Tap the button to talk to Santa
+                                </p>
+                            </>
+                        ) : (
+                            <>
+                                <h2 className="mb-2 text-2xl font-black tracking-wide text-[#0f172a] drop-shadow-sm sm:text-4xl">
+                                    Say &quot;Hey Santa&quot;
+                                </h2>
+                                <p className="text-lg font-medium text-[#475569]">
+                                    or tap the button below
+                                </p>
+                            </>
+                        )}
                     </div>
                 )}
             </section>
