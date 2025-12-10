@@ -72,19 +72,28 @@ export default function MagicInterface() {
     });
     const [micPermissionGranted, setMicPermissionGranted] = useState(false);
     const [isListeningForWakeWord, setIsListeningForWakeWord] = useState(false);
+    const [isDisconnecting, setIsDisconnecting] = useState(false);
 
     const conversation = useConversation({
+        apiKey: process.env.NEXT_PUBLIC_ELEVENLABS_API_KEY,
         onConnect: () => {
-            console.log('Connected');
+            console.log('Connected to ElevenLabs');
             setIsListeningForWakeWord(false); // Stop wake word listening when connected
         },
         onDisconnect: () => {
-            console.log('Disconnected');
+            console.log('Disconnected from ElevenLabs');
             if (recognitionRef.current) recognitionRef.current.stop();
             setIsListeningForWakeWord(false);
+            // Add small delay before allowing reconnection to show loading state
+            setTimeout(() => {
+                setIsDisconnecting(false);
+            }, 500);
         },
-        onMessage: (message) => console.log('Message:', message),
-        onError: (error) => console.error('Error:', error),
+        onMessage: (message) => console.log('Message received:', message),
+        onError: (error) => {
+            console.error('ElevenLabs Error:', error);
+            setErrorMsg(`Connection error: ${error}`);
+        },
     });
 
     const { status, isSpeaking } = conversation;
@@ -92,9 +101,20 @@ export default function MagicInterface() {
     const isConnecting = status === 'connecting';
     const statusRef = useRef({ isConnected, isConnecting });
 
+    // Debug: log conversation object and status
+    useEffect(() => {
+        console.log('Conversation status:', status, 'isConnected:', isConnected, 'isConnecting:', isConnecting);
+        console.log('Conversation object methods:', {
+            startSession: typeof conversation.startSession,
+            endSession: typeof conversation.endSession
+        });
+    }, [status, isConnected, isConnecting, conversation]);
+
     const recognitionRef = useRef<SpeechRecognition | null>(null);
     const restartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const sessionStartInFlightRef = useRef(false);
+    const wakeWordDetectedRef = useRef(false);
+    const lastRestartTimeRef = useRef<number>(0);
     useEffect(() => {
         statusRef.current = { isConnected, isConnecting };
     }, [isConnected, isConnecting]);
@@ -117,10 +137,15 @@ export default function MagicInterface() {
 
     const toggleConnection = useCallback(async () => {
         try {
+            console.log('toggleConnection called, isConnected:', isConnected, 'sessionInFlight:', sessionStartInFlightRef.current);
             setErrorMsg('');
-            if (isConnecting || sessionStartInFlightRef.current) return;
+            if (sessionStartInFlightRef.current) {
+                console.log('Session start already in flight, ignoring...');
+                return;
+            }
             if (isConnected) {
                 // User is turning the mic OFF explicitly
+                setIsDisconnecting(true);
                 setIsListeningForWakeWord(false);
                 if (recognitionRef.current) {
                     try {
@@ -131,29 +156,42 @@ export default function MagicInterface() {
                     recognitionRef.current = null;
                 }
                 await conversation.endSession();
+                // Wake word listener will auto-restart via useEffect after delay
             } else {
-                // If permission not yet granted, request it first and bail so the user can tap again
+                // If permission not yet granted, request it first
+                console.log('Checking mic permission, granted:', micPermissionGranted);
                 if (!micPermissionGranted) {
+                    console.log('Requesting mic permission...');
                     const granted = await requestMicPermission();
+                    console.log('Mic permission granted:', granted);
                     if (!granted) return;
-                    return;
+                    // Continue to start session if granted
                 }
 
+                console.log('Checking agentId:', agentId);
                 if (!agentId) {
                     setErrorMsg('Missing Agent ID. Please add it and try again.');
                     return;
                 }
 
-                if (recognitionRef.current) recognitionRef.current.stop(); // Stop wake word listener
+                if (recognitionRef.current) {
+                    console.log('Stopping wake word listener before session start');
+                    recognitionRef.current.stop();
+                }
                 setIsListeningForWakeWord(false);
 
                 sessionStartInFlightRef.current = true;
-                // @ts-expect-error SDK types mismatch for startSession
-                await conversation.startSession({ agentId });
-                sessionStartInFlightRef.current = false;
+                console.log('About to call startSession with config:', { agentId });
+                try {
+                    // @ts-expect-error SDK types mismatch for startSession
+                    const result = await conversation.startSession({ agentId });
+                    console.log('Session started successfully, result:', result);
+                } catch (sessionError) {
+                    console.error('startSession failed:', sessionError);
+                    throw sessionError;
+                }
             }
         } catch (err: unknown) {
-            sessionStartInFlightRef.current = false;
             console.error('Connection failed:', err);
             const message = err instanceof Error ? err.message : String(err);
             // Verify if it's a permission error that happened during connection
@@ -163,14 +201,29 @@ export default function MagicInterface() {
             } else {
                 setErrorMsg(message || 'Failed to connect. Is the Agent ID correct?');
             }
+        } finally {
+            sessionStartInFlightRef.current = false;
+            // Reset disconnecting state in case of error
+            if (isDisconnecting) {
+                setIsDisconnecting(false);
+            }
         }
-    }, [agentId, conversation, isConnected, isConnecting, micPermissionGranted, requestMicPermission]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [agentId, conversation, isConnected, micPermissionGranted, requestMicPermission]);
 
     const startWakeWordListener = useCallback(() => {
         const SpeechRecognitionCtor = getSpeechRecognitionConstructor();
         if (!SpeechRecognitionCtor) return;
         if (sessionStartInFlightRef.current) return;
         if (recognitionRef.current) return;
+        
+        // Prevent starting too quickly (debounce restarts)
+        const now = Date.now();
+        if (now - lastRestartTimeRef.current < 1000) {
+            console.log('Throttling wake word listener restart (too soon)');
+            return;
+        }
+        lastRestartTimeRef.current = now;
 
         const recognition = new SpeechRecognitionCtor();
         recognition.continuous = true;
@@ -185,13 +238,17 @@ export default function MagicInterface() {
                     if (isWakeWord(transcript)) {
                         console.log('Wake word detected!');
                         // Stop recognition before connecting to prevent conflicts
+                        wakeWordDetectedRef.current = true;
                         recognition.stop();
+                        // Small delay to allow recognition to fully stop
                         setTimeout(() => {
                             const { isConnected: connectedNow, isConnecting: connectingNow } = statusRef.current;
                             if (!connectedNow && !connectingNow && !sessionStartInFlightRef.current) {
+                                console.log('Initiating connection from wake word...');
                                 toggleConnection();
                             }
-                        }, 150);
+                            wakeWordDetectedRef.current = false;
+                        }, 200);
                     }
                 }
             }
@@ -203,20 +260,29 @@ export default function MagicInterface() {
             if (event.error === 'not-allowed') {
                 setMicPermissionGranted(false);
             }
-            setIsListeningForWakeWord(false);
+            // Only set listening to false if it's not an aborted error (which is normal)
+            if (event.error !== 'aborted') {
+                setIsListeningForWakeWord(false);
+            }
         };
 
         recognition.onend = () => {
-            console.log("Recognition ended");
+            console.log("Recognition ended, wakeWordDetected:", wakeWordDetectedRef.current, "sessionInFlight:", sessionStartInFlightRef.current);
             setIsListeningForWakeWord(false);
-            recognitionRef.current = null;
+            // Clear the ref after a small delay to avoid race conditions
+            setTimeout(() => {
+                if (recognitionRef.current === recognition) {
+                    recognitionRef.current = null;
+                }
+            }, 100);
         };
 
         try {
             recognition.start();
             setIsListeningForWakeWord(true);
-            // eslint-disable-next-line react-hooks/immutability
             recognitionRef.current = recognition;
+            // If wake word listener starts successfully, mic permission must be granted
+            setMicPermissionGranted(true);
             console.log("Wake word listener started");
         } catch (e) {
             console.error('Failed to start recognition', e);
@@ -225,17 +291,20 @@ export default function MagicInterface() {
 
     // Ensure wake word resumes whenever we're idle and have mic access
     useEffect(() => {
-        if (!isConnected && !isConnecting && micPermissionGranted && !isListeningForWakeWord && !sessionStartInFlightRef.current) {
+        if (!isConnected && !isConnecting && !isDisconnecting && micPermissionGranted && !isListeningForWakeWord && !sessionStartInFlightRef.current && !wakeWordDetectedRef.current) {
             if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
             restartTimeoutRef.current = setTimeout(() => {
                 restartTimeoutRef.current = null;
-                startWakeWordListener();
-            }, 400);
+                if (!wakeWordDetectedRef.current && !isDisconnecting && !sessionStartInFlightRef.current) {
+                    console.log('Auto-restarting wake word listener...');
+                    startWakeWordListener();
+                }
+            }, 500); // Increased delay to 500ms to prevent rapid restarts
         } else if (restartTimeoutRef.current) {
             clearTimeout(restartTimeoutRef.current);
             restartTimeoutRef.current = null;
         }
-    }, [isConnected, isConnecting, isListeningForWakeWord, micPermissionGranted, startWakeWordListener]);
+    }, [isConnected, isConnecting, isDisconnecting, isListeningForWakeWord, micPermissionGranted, startWakeWordListener]);
 
     // Auto-request Mic on Mount
     useEffect(() => {
@@ -284,7 +353,7 @@ export default function MagicInterface() {
                 </div>
 
                 {/* Wake Word Prompt */}
-                {!isConnected && !isConnecting && (
+                {!isConnected && !isConnecting && !isDisconnecting && (
                     <div className="w-full text-center animate-bounce-slow">
                         <h2 className="mb-2 text-2xl font-black tracking-wide text-[#0f172a] drop-shadow-sm sm:text-4xl">
                             Say &quot;Hey Santa&quot;
@@ -302,17 +371,17 @@ export default function MagicInterface() {
                     whileHover={{ scale: 1.1 }}
                     whileTap={{ scale: 0.9 }}
                     onClick={toggleConnection}
-                    disabled={isConnecting}
+                    disabled={isConnecting || isDisconnecting}
                     className={`relative z-10 flex h-24 w-24 items-center justify-center rounded-full transition-all duration-500 shadow-2xl sm:h-28 sm:w-28 ${isConnected
                         ? 'bg-red-500 hover:bg-red-600 shadow-red-500/50'
-                        : isConnecting
+                        : (isConnecting || isDisconnecting)
                             ? 'bg-yellow-500 shadow-yellow-500/50 animate-pulse'
                             : 'bg-green-600 hover:bg-green-500 shadow-green-600/50'
                         } ${!micPermissionGranted ? 'ring-2 ring-offset-2 ring-yellow-300' : ''}`}
                 >
                     {isConnected ? (
                         <MicOff className="h-10 w-10 text-white sm:h-12 sm:w-12" />
-                    ) : isConnecting ? (
+                    ) : (isConnecting || isDisconnecting) ? (
                         <Radio className="h-10 w-10 animate-spin text-white sm:h-12 sm:w-12" />
                     ) : (
                         <Mic className="h-10 w-10 text-white sm:h-12 sm:w-12" />
